@@ -3,12 +3,15 @@ from aws_cdk import (
     Stack,
     RemovalPolicy,
     Tags,
+    Fn,
+    CfnTag,
     aws_iam as iam,
     aws_ec2 as ec2,
     aws_batch as batch,
     aws_efs as efs
 )
 import boto3
+import base64
 
 from .stack_config import (
     stack_id,
@@ -132,6 +135,71 @@ class AwsBatchStack(Stack):
             allow_all_outbound=True
         )
 
+        # Define the block device
+        block_device = ec2.BlockDevice(
+            device_name="/dev/xvda",
+            volume=ec2.BlockDeviceVolume.ebs(
+                volume_size=2000,
+                delete_on_termination=True
+            )
+        )
+
+        # Define the launch template
+        # launch_template = ec2.LaunchTemplate(
+        #     scope=self,
+        #     id=launch_template_name,
+        #     launch_template_name=f"{stack_id}-EC2LaunchTemplate",
+        #     launch_template_data=ec2.CfnLaunchTemplate.LaunchTemplateDataProperty(
+        #         image_id="ami-0d625ab7e92ab3a43",
+        #         instance_type="g4dn.2xlarge",
+        #         # key_name="your-key-pair",
+        #         ebs_optimized=True,
+        #         block_device_mappings=[block_device],
+        #         # iam_instance_profile=ec2.CfnLaunchTemplate.IamInstanceProfileProperty(
+        #         #     arn=ecs_instance_role.role_arn
+        #         # ),
+        #         tag_specifications=[
+        #             ec2.CfnLaunchTemplate.TagSpecificationProperty(
+        #                 resource_type="instance",
+        #                 tags=[CfnTag(key="AWSBatchService", value="batch")]
+        #             )
+        #         ],
+        #         user_data=Fn.base64(
+        #             "#!/bin/bash\n" +
+        #             "mkfs -t ext4 /dev/xvda\n" +
+        #             "mkdir -p /tmp\n" +
+        #             "mount /dev/xvda /tmp\n"
+        #         )
+        #     )
+        # )
+        user_data_script = """MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="==BOUNDARY=="
+
+--==BOUNDARY==
+Content-Type: text/x-shellscript; charset="us-ascii"
+
+#!/bin/bash
+mkfs -t ext4 /dev/xvda
+mkdir -p /tmp
+mount /dev/xvda /tmp
+
+--==BOUNDARY==--
+"""
+        encoded_user_data = base64.b64encode(user_data_script.encode()).decode()
+        launch_template = ec2.LaunchTemplate(
+            scope=self,
+            id="DendroEC2LaunchTemplate",
+            launch_template_name="DendroEC2LaunchTemplate",
+            block_devices=[block_device],
+            instance_type=ec2.InstanceType("g4dn.2xlarge"),
+            machine_image=ec2.MachineImage.generic_linux({
+                "us-east-2": "ami-0d625ab7e92ab3a43"
+            }),
+            ebs_optimized=True,
+            user_data=ec2.UserData.custom(encoded_user_data)
+        )
+        Tags.of(launch_template).add("AWSBatchService", "batch")
+
         # Create an EFS filesystem
         if create_efs:
             file_system = efs.FileSystem(
@@ -208,6 +276,7 @@ class AwsBatchStack(Stack):
             security_groups=[security_group],
             service_role=batch_service_role, # type: ignore because Role implements IRole
             instance_role=ecs_instance_role, # type: ignore because Role implements IRole
+            launch_template=launch_template
         )
         Tags.of(compute_env_gpu).add("DendroName", f"{stack_id}-compute-env")
 
